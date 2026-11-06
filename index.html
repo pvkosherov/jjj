@@ -86,13 +86,41 @@
 const KEY = 'orders.v1';
 const $ = id => document.getElementById(id);
 let orders = [];
+let db = null, assets = null;   // споделено хранилище (ако е налично)
 try { orders = JSON.parse(localStorage.getItem(KEY)) || []; } catch (e) {}
 let draftImages = [];   // снимки във формата
 let editingId = null;
 
-function save() {
+function saveLocal() {
   try { localStorage.setItem(KEY, JSON.stringify(orders)); return true; }
   catch (e) { alert('Няма достатъчно място за запис. Изтрийте стари снимки или поръчки.'); return false; }
+}
+
+async function putOrder(o) {
+  if (db) {
+    const { id, ...rest } = o;
+    await db.collection('orders').doc(id).set(rest);   // списъкът се обновява от onSnapshot
+    return true;
+  }
+  const i = orders.findIndex(x => x.id === o.id);
+  if (i >= 0) orders[i] = o; else orders.unshift(o);
+  return saveLocal();
+}
+
+async function removeOrder(id) {
+  if (db) { await db.collection('orders').doc(id).delete(); return; }
+  orders = orders.filter(o => o.id !== id);
+  saveLocal();
+}
+
+// Качва снимката в споделеното хранилище; без него я пази като data URL
+async function storeImage(dataUrl) {
+  if (assets) {
+    const blob = await (await fetch(dataUrl)).blob();
+    const r = await assets.upload(blob);
+    return r.url;
+  }
+  return dataUrl;
 }
 
 // Намаляване на снимката, за да се събира в хранилището на браузъра
@@ -179,29 +207,31 @@ function edit(id) {
   renderPreviews(); window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
-function del(id) {
+async function del(id) {
   if (!confirm('Да изтрия ли тази поръчка?')) return;
-  orders = orders.filter(o => o.id !== id);
   if (editingId === id) resetForm();
-  save(); render();
+  try { await removeOrder(id); } catch (e) { alert('Неуспешно изтриване.'); return; }
+  render();
 }
 
 $('files').addEventListener('change', async e => {
   for (const f of e.target.files) {
-    try { draftImages.push(await shrink(f)); } catch (err) { alert('Неуспешно зареждане на ' + f.name); }
+    try { draftImages.push(await storeImage(await shrink(f))); } catch (err) { alert('Неуспешно зареждане на ' + f.name); }
   }
   e.target.value = ''; renderPreviews();
 });
 
-$('form').addEventListener('submit', e => {
+$('form').addEventListener('submit', async e => {
   e.preventDefault();
   const data = { customer: $('customer').value.trim(), orderNo: $('orderNo').value.trim(), qty: parseInt($('qty').value, 10), images: draftImages };
   const dup = orders.some(o => o.orderNo.toLowerCase() === data.orderNo.toLowerCase() && o.id !== editingId);
   if (dup && !confirm('Вече има поръчка с този номер. Да продължа ли?')) return;
-  const backup = JSON.stringify(orders);
-  if (editingId) Object.assign(orders.find(o => o.id === editingId), data);
-  else orders.unshift({ id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), created: new Date().toISOString(), ...data });
-  if (!save()) { orders = JSON.parse(backup); return; }
+  const old = editingId && orders.find(o => o.id === editingId);
+  const order = old
+    ? { ...old, ...data }
+    : { id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), created: new Date().toISOString(), ...data };
+  try { if (!(await putOrder(order))) return; }
+  catch (err) { alert('Неуспешен запис: ' + (err.message || err.code || err)); return; }
   resetForm(); render();
 });
 
@@ -210,6 +240,24 @@ $('search').addEventListener('input', render);
 $('viewer').addEventListener('click', () => $('viewer').close());
 
 renderPreviews(); render();
+
+// Включване на споделеното хранилище (достъп от други устройства)
+(async () => {
+  try {
+    if (!window.claude) return;
+    db = await claude.use('db');
+    assets = await claude.use('assets');
+  } catch (e) { db = null; }
+  if (!db) return;
+  orders = [];
+  render();
+  db.collection('orders').onSnapshot(snap => {
+    orders = snap.docs.map(d => ({ id: d.id, ...d.data() }))
+      .sort((a, b) => String(b.created).localeCompare(String(a.created)));
+    render();
+  }, err => { console.error(err); });
+  document.querySelector('h1').insertAdjacentHTML('afterend', '<small style="color:var(--muted)">☁ Синхронизирано между устройствата</small>');
+})();
 </script>
 </body>
 </html>
