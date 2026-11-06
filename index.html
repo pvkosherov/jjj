@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="bg">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Управление на поръчки</title>
+<style>
+  :root { --bg:#f4f6fa; --card:#fff; --text:#1c2333; --muted:#6b7385; --line:#dfe3ec; --accent:#2f6fed; --danger:#d93a3a; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#12151c; --card:#1b2030; --text:#e8ebf3; --muted:#9aa3b8; --line:#2c3347; --accent:#5b8dff; --danger:#ff6b6b; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font:16px/1.5 system-ui,sans-serif; background:var(--bg); color:var(--text); }
+  header { padding:20px 16px 8px; max-width:1000px; margin:0 auto; }
+  h1 { margin:0; font-size:1.5rem; }
+  main { max-width:1000px; margin:0 auto; padding:8px 16px 40px; display:grid; gap:16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; }
+  form { display:grid; gap:12px; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); align-items:end; }
+  label { display:grid; gap:4px; font-size:.85rem; color:var(--muted); }
+  input[type=text], input[type=number], input[type=search] {
+    font:inherit; padding:10px; border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--text); width:100%;
+  }
+  input:focus { outline:2px solid var(--accent); border-color:transparent; }
+  .full { grid-column:1/-1; }
+  button { font:inherit; padding:10px 16px; border:0; border-radius:8px; background:var(--accent); color:#fff; cursor:pointer; }
+  button.ghost { background:transparent; color:var(--text); border:1px solid var(--line); }
+  button.danger { background:transparent; color:var(--danger); border:1px solid var(--line); }
+  .previews, .thumbs { display:flex; flex-wrap:wrap; gap:8px; }
+  .previews:empty { display:none; }
+  .th { position:relative; }
+  .th img { width:84px; height:84px; object-fit:cover; border-radius:8px; border:1px solid var(--line); display:block; cursor:zoom-in; }
+  .th button { position:absolute; top:-6px; right:-6px; width:24px; height:24px; padding:0; border-radius:50%; background:var(--danger); line-height:1; }
+  .toolbar { display:flex; gap:12px; align-items:center; justify-content:space-between; flex-wrap:wrap; }
+  .toolbar input { max-width:320px; }
+  .order { display:grid; gap:10px; }
+  .order + .order { border-top:1px solid var(--line); padding-top:16px; margin-top:16px; }
+  .row { display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap; align-items:flex-start; }
+  .meta { display:flex; gap:16px; flex-wrap:wrap; color:var(--muted); font-size:.9rem; }
+  .meta b { color:var(--text); }
+  .name { font-weight:600; font-size:1.1rem; }
+  .actions { display:flex; gap:8px; }
+  .actions button { padding:6px 12px; font-size:.9rem; }
+  .empty { color:var(--muted); text-align:center; padding:24px 0; }
+  dialog { border:0; border-radius:12px; padding:0; max-width:95vw; background:transparent; }
+  dialog::backdrop { background:rgba(0,0,0,.75); }
+  dialog img { max-width:95vw; max-height:90vh; display:block; border-radius:12px; }
+</style>
+</head>
+<body>
+<header><h1>📦 Управление на поръчки</h1></header>
+<main>
+  <section class="card">
+    <form id="form">
+      <label>Име на клиент
+        <input type="text" id="customer" required placeholder="напр. Иван Петров">
+      </label>
+      <label>Номер на поръчка
+        <input type="text" id="orderNo" required placeholder="напр. 2026-001">
+      </label>
+      <label>Брой поръчани детайли
+        <input type="number" id="qty" required min="1" step="1" placeholder="напр. 50">
+      </label>
+      <label class="full">Снимки
+        <input type="file" id="files" accept="image/*" multiple>
+      </label>
+      <div class="previews full" id="previews"></div>
+      <div class="full" style="display:flex;gap:8px">
+        <button type="submit" id="submitBtn">Добави поръчка</button>
+        <button type="button" class="ghost" id="cancelBtn" hidden>Отказ</button>
+      </div>
+    </form>
+  </section>
+
+  <section class="card">
+    <div class="toolbar">
+      <strong id="count"></strong>
+      <input type="search" id="search" placeholder="Търсене по клиент или номер…">
+    </div>
+    <div id="list"></div>
+  </section>
+</main>
+
+<dialog id="viewer"><img id="viewerImg" alt=""></dialog>
+
+<script>
+const KEY = 'orders.v1';
+const $ = id => document.getElementById(id);
+let orders = [];
+try { orders = JSON.parse(localStorage.getItem(KEY)) || []; } catch (e) {}
+let draftImages = [];   // снимки във формата
+let editingId = null;
+
+function save() {
+  try { localStorage.setItem(KEY, JSON.stringify(orders)); return true; }
+  catch (e) { alert('Няма достатъчно място за запис. Изтрийте стари снимки или поръчки.'); return false; }
+}
+
+// Намаляване на снимката, за да се събира в хранилището на браузъра
+function shrink(file, max = 1000) {
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onerror = reject;
+    fr.onload = () => {
+      const img = new Image();
+      img.onerror = reject;
+      img.onload = () => {
+        const k = Math.min(1, max / Math.max(img.width, img.height));
+        const c = document.createElement('canvas');
+        c.width = Math.round(img.width * k); c.height = Math.round(img.height * k);
+        c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+        resolve(c.toDataURL('image/jpeg', 0.8));
+      };
+      img.src = fr.result;
+    };
+    fr.readAsDataURL(file);
+  });
+}
+
+function thumbs(list, removable, onRemove) {
+  const box = document.createElement('div');
+  box.className = removable ? 'previews' : 'thumbs';
+  list.forEach((src, i) => {
+    const d = document.createElement('div'); d.className = 'th';
+    const im = document.createElement('img'); im.src = src; im.alt = 'Снимка ' + (i + 1);
+    im.onclick = () => { $('viewerImg').src = src; $('viewer').showModal(); };
+    d.append(im);
+    if (removable) {
+      const b = document.createElement('button'); b.type = 'button'; b.textContent = '×'; b.title = 'Премахни';
+      b.onclick = () => onRemove(i); d.append(b);
+    }
+    box.append(d);
+  });
+  return box;
+}
+
+function renderPreviews() {
+  const p = $('previews');
+  p.replaceWith(Object.assign(thumbs(draftImages, true, i => { draftImages.splice(i, 1); renderPreviews(); }), { id: 'previews' }));
+  $('previews').classList.add('full');
+}
+
+function render() {
+  const q = $('search').value.trim().toLowerCase();
+  const shown = orders.filter(o => !q || o.customer.toLowerCase().includes(q) || o.orderNo.toLowerCase().includes(q));
+  $('count').textContent = `Поръчки: ${shown.length}` + (q ? ` от ${orders.length}` : '');
+  const list = $('list'); list.textContent = '';
+  if (!shown.length) { list.innerHTML = '<div class="empty">Няма поръчки.</div>'; return; }
+  shown.forEach(o => {
+    const el = document.createElement('div'); el.className = 'order';
+    const row = document.createElement('div'); row.className = 'row';
+    const info = document.createElement('div');
+    const n = document.createElement('div'); n.className = 'name'; n.textContent = o.customer;
+    const m = document.createElement('div'); m.className = 'meta';
+    const mk = (l, v) => { const s = document.createElement('span'); s.append(l + ': '); const b = document.createElement('b'); b.textContent = v; s.append(b); return s; };
+    m.append(mk('Поръчка №', o.orderNo), mk('Детайли', o.qty), mk('Създадена', new Date(o.created).toLocaleDateString('bg-BG')));
+    info.append(n, m);
+    const act = document.createElement('div'); act.className = 'actions';
+    const e = document.createElement('button'); e.className = 'ghost'; e.textContent = 'Редактирай'; e.onclick = () => edit(o.id);
+    const d = document.createElement('button'); d.className = 'danger'; d.textContent = 'Изтрий'; d.onclick = () => del(o.id);
+    act.append(e, d);
+    row.append(info, act);
+    el.append(row);
+    if (o.images.length) el.append(thumbs(o.images, false));
+    list.append(el);
+  });
+}
+
+function resetForm() {
+  $('form').reset(); draftImages = []; editingId = null;
+  $('submitBtn').textContent = 'Добави поръчка'; $('cancelBtn').hidden = true;
+  renderPreviews();
+}
+
+function edit(id) {
+  const o = orders.find(x => x.id === id); if (!o) return;
+  editingId = id; draftImages = [...o.images];
+  $('customer').value = o.customer; $('orderNo').value = o.orderNo; $('qty').value = o.qty;
+  $('submitBtn').textContent = 'Запази промените'; $('cancelBtn').hidden = false;
+  renderPreviews(); window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+function del(id) {
+  if (!confirm('Да изтрия ли тази поръчка?')) return;
+  orders = orders.filter(o => o.id !== id);
+  if (editingId === id) resetForm();
+  save(); render();
+}
+
+$('files').addEventListener('change', async e => {
+  for (const f of e.target.files) {
+    try { draftImages.push(await shrink(f)); } catch (err) { alert('Неуспешно зареждане на ' + f.name); }
+  }
+  e.target.value = ''; renderPreviews();
+});
+
+$('form').addEventListener('submit', e => {
+  e.preventDefault();
+  const data = { customer: $('customer').value.trim(), orderNo: $('orderNo').value.trim(), qty: parseInt($('qty').value, 10), images: draftImages };
+  const dup = orders.some(o => o.orderNo.toLowerCase() === data.orderNo.toLowerCase() && o.id !== editingId);
+  if (dup && !confirm('Вече има поръчка с този номер. Да продължа ли?')) return;
+  const backup = JSON.stringify(orders);
+  if (editingId) Object.assign(orders.find(o => o.id === editingId), data);
+  else orders.unshift({ id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), created: new Date().toISOString(), ...data });
+  if (!save()) { orders = JSON.parse(backup); return; }
+  resetForm(); render();
+});
+
+$('cancelBtn').onclick = resetForm;
+$('search').addEventListener('input', render);
+$('viewer').addEventListener('click', () => $('viewer').close());
+
+renderPreviews(); render();
+</script>
+</body>
+</html>
